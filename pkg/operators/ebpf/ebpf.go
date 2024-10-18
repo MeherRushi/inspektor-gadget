@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -543,6 +544,13 @@ func (i *ebpfInstance) tracePipe(gadgetCtx operators.GadgetContext) error {
 	return nil
 }
 
+// Golang representation of struct gadget_l3endpoint_t in include/gadget/types.h
+type ipAddr struct {
+	v6      [16]byte
+	version uint8
+	pad     [3]byte
+}
+
 func (i *ebpfInstance) Start(gadgetCtx operators.GadgetContext) error {
 	i.logger.Debugf("starting ebpfInstance")
 
@@ -580,21 +588,30 @@ func (i *ebpfInstance) Start(gadgetCtx operators.GadgetContext) error {
 		if !p.fromEbpf {
 			continue
 		}
-		constReplacements[name] = paramMap[name].AsAny()
+		paramValue := paramMap[name].AsAny()
 
-		ipv4addrPrefixFunc := hasPrefix(ipaddrV4Prefix)
-		ipv6addrPrefixFunc := hasPrefix(ipaddrV6Prefix)
-		if _, ok := ipv4addrPrefixFunc(name); ok {
-			if constReplacements[name], err = gadgets.IPStringToUint32(paramMap[name].AsString()); err != nil {
-				return fmt.Errorf("error converting IP string to 32 uint value: %v. %w", paramMap[name], err)
+		switch p.TypeHint {
+		case api.TypeIP:
+			i.logger.Infof("handling IP param: %q", name)
+			ipAddr := ipAddr{}
+			ipParam := paramValue.(net.IP)
+			if ip := ipParam.To4(); ip != nil {
+				ipAddr.version = 4
+				copy(ipAddr.v6[:4], ip)
+			} else if ip := ipParam.To16(); ip != nil {
+				copy(ipAddr.v6[:], ip)
+				ipAddr.version = 6
+			} else {
+				// TODO: is it possible?
+				return fmt.Errorf("invalid IP address: %v", ipParam)
 			}
+			paramValue = ipAddr
+
+			fmt.Printf("IP: %+v\n", ipAddr)
 		}
-		if _, ok := ipv6addrPrefixFunc(name); ok {
-			if constReplacements[name], err = gadgets.IPStringToUint128(paramMap[name].AsString()); err != nil {
-				return fmt.Errorf("error converting IP string to u128 value: %v. %w", paramMap[name], err)
-			}
-		}
-		i.logger.Debugf("setting param value %q = %v", name, constReplacements[name])
+
+		constReplacements[name] = paramValue
+		i.logger.Debugf("setting param value %q = %v", name, paramMap[name].AsAny())
 	}
 
 	for _, v := range i.vars {
